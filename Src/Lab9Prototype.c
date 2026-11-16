@@ -26,6 +26,11 @@
 #define SOLENOID_BITMASK (1U << SOLENOID_BITNUM)
 #define LED_BITNUM 5U
 #define LED_BITMASK (1U << LED_BITNUM)
+#define SOUND_BITNUM 15U
+#define SOUND_BITMASK (1U << SOUND_BITNUM)
+#define PLAY_BITNUM 7U
+#define PLAY_BITMASK (1U << PLAY_BITNUM)
+#define PLAY_PULSE_MS 50U
 #define GPIO_BSRR_RESET_BIT_OFFSET 16U
 #define SAMPLE_MS 20U
 #define STATUS_MS 1000U
@@ -34,6 +39,11 @@
 /* Keep the default bench build's coil output off. */
 #ifndef SOLENOID_HOLD_ENABLED
 #define SOLENOID_HOLD_ENABLED 0U
+#endif
+
+/* Sound module output 
+#ifndef SOUND_ACTIVE_HIGH
+#define SOUND_ACTIVE_HIGH 1U
 #endif
 
 static void InitializeGPIO(void) {
@@ -49,6 +59,14 @@ static void InitializeGPIO(void) {
     GPIOB->MODER &= ~GPIO_MODER_MODE10_Msk;
     GPIOB->PUPDR = (GPIOB->PUPDR & ~GPIO_PUPDR_PUPD10_Msk)
                  | (GPIO_PULLUP << GPIO_PUPDR_PUPD10_Pos);
+    /* The sound module is in PA15 - mode 00, no pull; PA15 doesnt reset to input */
+    GPIOA->MODER &= ~GPIO_MODER_MODE15_Msk;
+    GPIOA->PUPDR &= ~GPIO_PUPDR_PUPD15_Msk;
+
+    /*recorder on PC7, starts low then gives output */
+    GPIOC->ODR &= ~PLAY_BITMASK;
+    GPIOC->MODER = (GPIOC->MODER & ~GPIO_MODER_MODE7_Msk) | (GPIO_OUTPUT << GPIO_PUPDR_MODE7_Pos);
+    
 }
 
 static void ApplyOutputs(const SafeState *state) {
@@ -61,6 +79,26 @@ static void ApplyOutputs(const SafeState *state) {
 #endif
     GPIOA->BSRR = state->unlock_requested ? LED_BITMASK
                                          : (LED_BITMASK << GPIO_BSRR_RESET_BIT_OFFSET);
+}
+static bool SoundActive (void) {
+    bool high = (GPIOA->IDR & SOUND_BITMASK) != OU;
+    return (SOUND_ACTIVE_HIGH >  OU) ? high : !high;
+}
+/* recorder playback, raise playe then drop a little later, loop doesnt wait
+static bool play_active = false;
+static uint32_t play_started = OU;
+
+static void StartPlayback(uint32_t now) {
+    GPIOC->ODR |= PLAY_BITMASK;
+    play_active = true;
+    play_started = now;
+}
+
+static void ServicePlayback(uint32_t now) {
+    if (play_active && (uint32_t)(now - play_started) >= PLAY_PULSE_MS) {
+        GPIOC->ODR &= ~PLAY_BITMASK;
+        play_active = false;
+    }
 }
 
 static void SendStatus(const SafeState *state) {
@@ -114,7 +152,12 @@ int main(void) {
     while (1) {
         uint32_t now = milliseconds();
         ApplyOutputs(&state);
-
+        if (KnockSafe(&state, now, SoundActive())) {
+            (void)BLE_Queue("3 KNOCKS\r\n");
+            printf("3 knocks\r\n");
+            ApplyOutputs(&state);
+        }
+        
         if ((uint32_t)(now - last_sample) >= SAMPLE_MS) {
             last_sample = now;
             int pot = adc_getValue();
@@ -135,6 +178,12 @@ int main(void) {
             ProcessCommand(&state, uart2_read());
             ApplyOutputs(&state);
         }
+        if (state.unlock_requested && !was_unlocked) {
+            StartPlayback(now);
+        }
+        was_unlocked = state.unlock_requested;
+        ServicePlayback(now);
+        
         if ((uint32_t)(now - last_status) >= STATUS_MS) {
             last_status = now;
             SendStatus(&state);
