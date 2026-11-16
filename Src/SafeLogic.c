@@ -7,6 +7,11 @@
 #define POT_LOW_MAX 1228U
 #define POT_HIGH_MIN 2867U
 
+#define KNOCKS_NEEDED 3U
+#define KNOCK_LOCKOUT_MS 150U   // ignore ringing right after a knock 
+#define KNOCK_GAP_MAX_MS 1500U  // too long between knocks: start over
+#define KNOCK_SETTLE_MS 3000U   // deaf after a lock change (solenoid click, recorder playing)
+
 void InitializeSafe(SafeState *state, uint32_t now) {
     *state = (SafeState){0};
     state->button_changed_at = now;
@@ -57,5 +62,44 @@ bool ProcessSafeCommand(SafeState *state, char command) {
         LockSafe(state);
         return true;
     }
+bool KnockSafe(SafeState *state, uint32_t now, bool sound_active) {
+    // Any lock/unlock change (button, pot, phone, or knocks) makes the safe
+       deaf for a few seconds: the solenoid click and the recorder's playback
+       would otherwise be heard as knocks
+    if (state->unlock_requested != state->prev_unlock) {
+        state->prev_unlock = state->unlock_requested;
+        state->knock_count = 0;
+        state->knock_ignore_until = now + KNOCK_SETTLE_MS;
+    }
+
+    // half-finished attempt expires if the next knock takes too long
+    if (state->knock_count > 0U &&
+        (uint32_t)(now - state->last_knock_at) > KNOCK_GAP_MAX_MS) {
+        state->knock_count = 0;
+    }
+
+    // knock is the sound input going from quiet to loud
+    bool new_knock = sound_active && !state->knock_raw;
+    state->knock_raw = sound_active;
+    if (!new_knock) {
+        return false;
+    }
+    if ((int32_t)(now - state->knock_ignore_until) < 0) {
+        return false;
+    }
+    if (state->knock_count > 0U &&
+        (uint32_t)(now - state->last_knock_at) < KNOCK_LOCKOUT_MS) {
+        return false;  // same knock ringing, not a new one
+    }
+
+    state->knock_count++;
+    state->last_knock_at = now;
+    if (state->knock_count >= KNOCKS_NEEDED) {
+        state->knock_count = 0;
+        state->unlock_requested = !state->unlock_requested;
+        return true;
+    }
     return false;
 }
+
+
